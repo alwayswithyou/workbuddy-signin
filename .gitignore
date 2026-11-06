@@ -1,0 +1,10 @@
+# 真实凭据（含 corpid/secret），切勿提交
+wecom.conf
+
+# 运行产物
+signin-cron.log
+.token-expired.flag
+
+# Python
+__pycache__/
+*.pyc
