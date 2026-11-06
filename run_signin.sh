@@ -74,8 +74,6 @@ else:
     lines = []
     if d.get("today_credit") is not None:
         lines.append("🎯 本次签到获取：+%s 积分" % d.get("today_credit"))
-    if d.get("total_credits") is not None:
-        lines.append("💰 当前总积分：%s" % d.get("total_credits"))
     if d.get("streak_days") is not None:
         lines.append("🔥 连续签到：%s 天" % d.get("streak_days"))
     if rep:
@@ -95,5 +93,66 @@ if [ "$RES" = "AUTH_FAIL" ]; then
   command -v notify-send >/dev/null 2>&1 && DISPLAY=:0 notify-send "WorkBuddy 签到" "鉴权失败，请运行 codebuddy 重新登录" 2>/dev/null
 else
   rm -f "$FLAG"
+  # 账户总剩余积分 + 临期积分（来自计费接口，独立于签到累计的 total_credits）
+  BAL=$("$PY" - "$AUTH" <<'PY'
+import json, sys, time, ssl, urllib.request
+def post(url, headers):
+    req = urllib.request.Request(url, data=b"{}", headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=10, context=ssl.create_default_context()) as r:
+        return json.loads(r.read().decode("utf-8"))
+try:
+    d = json.load(open(sys.argv[1]))
+    tok = d["auth"]["accessToken"]; uid = d["account"]["uid"]
+    ent = d["account"].get("enterpriseId"); dom = d["auth"].get("domain")
+    H = {"Accept": "application/json", "Authorization": "Bearer %s" % tok,
+         "Content-Type": "application/json", "X-User-Id": uid, "User-Agent": "WorkBuddy"}
+    if ent: H["X-Enterprise-Id"] = ent; H["X-Tenant-Id"] = ent
+    if dom: H["X-Domain"] = dom
+    ep = d["auth"].get("endpoint") or "https://copilot.tencent.com"
+    if not ep.startswith("http"): ep = "https://" + ep
+    summ = post(ep + "/billing/meter/get-user-resource-summary", H)
+    total = 0.0
+    for p in summ.get("data", {}).get("Packages", []):
+        try: total += float(p.get("CycleRemainCapacity") or 0)
+        except Exception: pass
+    res = post(ep + "/billing/meter/get-user-resource", H)
+    accounts = res.get("data", {}).get("Response", {}).get("Data", {}).get("Accounts", [])
+    now = time.time() * 1000.0
+    e7 = e30 = 0.0
+    for a in accounts:
+        et = a.get("CycleEndTime")
+        if not et: continue
+        try:
+            t = time.mktime(time.strptime(et, "%Y-%m-%d %H:%M:%S")) * 1000
+        except Exception:
+            continue
+        days = (t - now) / 86400000.0
+        if days < 0: days = 0
+        rem = 0.0
+        for k in ("CycleCapacityRemainPrecise", "CycleCapacityRemain",
+                  "CapacityRemainPrecise", "CapacityRemain"):
+            v = a.get(k)
+            if v is not None:
+                try: rem = float(v); break
+                except Exception: pass
+        if days <= 7: e7 += rem
+        if days <= 30: e30 += rem
+    print("BAL")
+    print("%.2f|%.2f|%.2f" % (total, e7, e30))
+except Exception as e:
+    print("BAL_FAIL")
+    print("余额查询失败：%s" % e)
+PY
+  )
+  BRES=$(echo "$BAL" | head -1)
+  if [ "$BRES" = "BAL" ]; then
+    BDATA=$(echo "$BAL" | tail -n +2 | head -1)
+    IFS='|' read -r BTOT BE7 BE30 <<< "$BDATA"
+    CONTENT="${CONTENT}
+💰 账户总剩余积分：${BTOT}
+⏳ 临期积分：7天内到期 ${BE7} / 30天内到期 ${BE30}（请尽快使用）"
+  else
+    echo "$(ts) [wrap] 余额查询失败：$BAL" >> "$LOG"
+  fi
   notify "✅ WorkBuddy 签到成功" "$CONTENT"
 fi
